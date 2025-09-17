@@ -12,11 +12,13 @@ import os
 import time
 import base64
 import threading
+import webbrowser
 
-# Biến toàn cục để lưu đường dẫn thư mục và danh sách tệp ảnh
+# Biến toàn cục để lưu đường dẫn thư mục, danh sách tệp ảnh và trạng thái
 image_folder_path = ""
 image_files = []
 is_processing = False
+stop_thread = False
 
 def select_image_folder():
     """Mở hộp thoại để người dùng chọn thư mục chứa ảnh."""
@@ -31,7 +33,7 @@ def select_image_folder():
         # Lấy danh sách các tệp ảnh từ thư mục đã chọn
         image_files = [
             os.path.join(image_folder_path, f) 
-            for f in os.listdir(image_folder_path) 
+            for f in os.path.listdir(image_folder_path) 
             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
         ]
         
@@ -44,13 +46,13 @@ def generate_video_task():
     """
     Hàm này chạy trong một luồng riêng để tự động hóa trình duyệt ở chế độ ẩn.
     """
-    global image_files, is_processing
+    global image_files, is_processing, stop_thread
     is_processing = True
+    stop_thread = False
 
-    # Khởi tạo đối tượng Options và các tham số cần thiết
     chrome_options = Options()
     chrome_options.add_argument("--incognito")
-    chrome_options.add_argument("--headless")  # Dòng này kích hoạt chế độ chạy ngầm
+    # chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -59,12 +61,17 @@ def generate_video_task():
     driver = None
     service = Service(ChromeDriverManager().install())
     
+    description = text_description.get("1.0", tk.END).strip()
+    
     try:
         driver = webdriver.Chrome(service=service, options=chrome_options)
         wait = WebDriverWait(driver, 120)
 
-        # Lặp qua từng tệp ảnh trong danh sách
         for i, image_path in enumerate(image_files):
+            if stop_thread:
+                update_gui_status("Đã dừng quá trình xử lý.", "orange")
+                break
+                
             update_gui_status(f"Đang xử lý ảnh {i+1}/{len(image_files)}: {os.path.basename(image_path)}", "blue")
             
             driver.get("https://vheer.com/app/image-to-video")
@@ -74,7 +81,7 @@ def generate_video_task():
                 input_element.send_keys(os.path.abspath(image_path))
                 
                 description_element = wait.until(EC.presence_of_element_located((By.XPATH, "//textarea[@placeholder='Input image description here or use the prompts generator']")))
-                description_element.send_keys(entry_description.get())
+                description_element.send_keys(description)
                 
                 generate_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Generate']")))
                 generate_button.click()
@@ -127,8 +134,10 @@ def generate_video_task():
         if driver:
             driver.quit()
         is_processing = False
-        update_gui_status("Hoàn thành! Sẵn sàng", "green")
+        if not stop_thread:
+            update_gui_status("Hoàn thành! Sẵn sàng", "green")
         button_generate.config(state=tk.NORMAL)
+        button_stop.config(state=tk.DISABLED)
 
 def update_gui_status(text, color):
     """Cập nhật trạng thái giao diện một cách an toàn từ luồng khác."""
@@ -136,6 +145,7 @@ def update_gui_status(text, color):
 
 def start_generation_thread():
     """Bắt đầu một luồng mới để chạy tác vụ tạo video."""
+    global stop_thread
     if is_processing:
         return
 
@@ -143,23 +153,33 @@ def start_generation_thread():
         messagebox.showerror("Lỗi", "Vui lòng chọn một thư mục chứa ảnh trước.")
         return
 
-    description = entry_description.get()
+    description = text_description.get("1.0", tk.END).strip()
     if not description:
         messagebox.showerror("Lỗi", "Bạn phải nhập mô tả cho ảnh.")
         return
 
-    # Vô hiệu hóa nút để tránh người dùng nhấn lại
     button_generate.config(state=tk.DISABLED)
+    button_stop.config(state=tk.NORMAL)
     
-    # Tạo và chạy một luồng mới cho hàm generate_video_task
     process_thread = threading.Thread(target=generate_video_task)
     process_thread.start()
+
+def stop_generation():
+    """Đặt biến cờ để dừng luồng xử lý."""
+    global stop_thread
+    stop_thread = True
+    update_gui_status("Đang yêu cầu dừng, vui lòng chờ...", "orange")
+    button_stop.config(state=tk.DISABLED)
+
+def open_link(url):
+    """Mở một URL trong trình duyệt web mặc định."""
+    webbrowser.open_new(url)
 
 # --- Tạo Giao diện người dùng với Tkinter ---
 
 root = tk.Tk()
 root.title("Tự động hóa tạo video hàng loạt")
-root.geometry("450x300")
+root.geometry("800x420")
 root.configure(padx=20, pady=20)
 
 # 1. Thêm nút chọn thư mục ảnh
@@ -171,15 +191,47 @@ button_select.pack(side="left", padx=5)
 label_status = tk.Label(frame_image, text="Chưa có thư mục nào được chọn.", fg="gray")
 label_status.pack(side="left", padx=5)
 
-# 2. Thêm ô nhập mô tả
+# 2. Thêm ô nhập mô tả (Text thay cho Entry)
 label_description = tk.Label(root, text="Mô tả cho tất cả các ảnh:")
 label_description.pack(fill="x")
-entry_description = tk.Entry(root)
-entry_description.pack(fill="x", pady=5)
+text_description = tk.Text(root, height=8, wrap="word")
+text_description.pack(fill="x", pady=5)
 
-# 3. Thêm nút tạo video
-button_generate = tk.Button(root, text="Tạo video hàng loạt", command=start_generation_thread)
-button_generate.pack(fill="x", pady=15)
+# 3. Thêm các nút điều khiển
+frame_buttons = tk.Frame(root)
+frame_buttons.pack(fill="x", pady=15)
+
+button_generate = tk.Button(frame_buttons, text="Tạo video", command=start_generation_thread)
+button_generate.pack(side="left", expand=True, padx=5)
+
+button_stop = tk.Button(frame_buttons, text="Dừng chạy", command=stop_generation, state=tk.DISABLED)
+button_stop.pack(side="left", expand=True, padx=5)
+
+
+# 5. Thêm nhãn thông tin tài khoản
+label_account_info = tk.Label(
+    root,
+    text="VPBANK (VIETNAM) - SWIFT/BIC: VPBKVNVX - ACCOUNT NUMBER: 155081748 . THANKS",
+    fg="blue",
+    font=("Arial", 12)
+)
+label_account_info.pack(side="bottom", fill="x", pady=(10, 0))
+
+# 6. Thêm nhãn liên kết mới (đây là phần bạn muốn thêm)
+label_bottom_link = tk.Label(
+    root,
+    text="CLICK LINK TO DONATE ME: https://buymeacoffee.com/htt117",
+    fg="red",
+    font=("Arial", 16, "bold"),
+    cursor="hand2"
+)
+label_bottom_link.pack(side="bottom", fill="x", pady=(10, 0))
+
+# Gán sự kiện click cho nhãn
+label_bottom_link.bind(
+    "<Button-1>",
+    lambda e: open_link("https://www.facebook.com/your.username")
+)
 
 # Chạy vòng lặp sự kiện chính của Tkinter
 root.mainloop()
